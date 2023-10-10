@@ -1,12 +1,17 @@
 #include <windows.h>
 #include <stdio.h>
 
-#define DEBUG_PRINT
+#undef DEBUG_PRINT
 #ifdef DEBUG_PRINT
     #include <conio.h>
 #endif
 
 int target_interval = 300; //seconds
+
+wchar_t config_file_name[] = L"config.txt";
+BOOL working_day[7] = {1, 1, 1, 1, 1, 0, 0};
+WORD working_hour[10][2] = {{830, 1200}, {1330, 1800}};
+int working_hour_len = 2;
 
 #define ID_MENU_PAUSED 1
 #define ID_MENU_START 2
@@ -32,24 +37,84 @@ HANDLE mintThread;
 MENUITEMINFOA newMenuItemInfo;
 
 BOOL inRestTime() {
-    SYSTEMTIME time;
-    WORD day, hour, minute;
+    SYSTEMTIME now;
+    WORD day, time;
     BOOL shouldRest;
 
-    GetLocalTime(&time);
-    day = time.wDayOfWeek;
-    hour = time.wHour;
-    minute = time.wMinute;
-    shouldRest = (
-        (day >= 6) || //weekend
-        ((day < 6) && (
-            ((hour < 8) || ((hour == 8) && (minute < 30))) || //befor 08:30
-            ((hour == 12) || ((hour == 13) && (minute < 30))) || //12:00 ~ 13:30
-            (hour >= 18) //after 18:00
-        ))
-    );
+    GetLocalTime(&now);
+    
+    day = now.wDayOfWeek - 1;
+    time = now.wHour * 100 + now.wMinute;
+    shouldRest = TRUE;
+    if (working_day[day]) {
+        for (int i = 0; i < working_hour_len; i++) {
+            if ((time >= working_hour[i][0]) && (time <= working_hour[i][1])) {
+                shouldRest = FALSE;
+                break;
+            }
+        }
+    }
 
     return shouldRest;
+}
+
+BOOL parseWorkingHours(wchar_t* s) {
+    char buf[255];
+    char* ptr;
+    int i;
+    FILE* f;
+    f = _wfopen(s, L"r");
+#ifdef DEBUG_PRINT
+    printf("%d %p\n", errno, f);
+#endif
+    if (f) {
+        //clear setting
+        memset(working_day, 0, sizeof(working_day));
+        memset(working_hour, 0, sizeof(working_hour));
+        working_hour_len = 0;
+        //read working day line
+        fgets(buf, 255, f);
+        if (strlen(buf) < 2) { //at least one day + \n
+            return FALSE;
+        }
+        ptr = buf;
+        while (*ptr != '\n') { //parse
+            int day = *ptr - '0';
+            if ((day < 1) || (day > 7)) {
+                return FALSE;
+            } else {
+                working_day[day - 1] = TRUE;
+            }
+            ptr++;
+            if ((*ptr != '\n') && (*ptr != ' ')) {
+                return FALSE;
+            }
+            while (*ptr == ' ') ptr++;
+        }
+        //parse working hour
+        i = 0;
+        while (fgets(buf, 255, f)) {
+            int result;
+            if (sscanf(buf, "%d %d", &(working_hour[i][0]), &(working_hour[i][1])) != 2) {
+                return FALSE;
+            }
+            i++;
+        }
+        working_hour_len = i;
+
+#ifdef DEBUG_PRINT
+        for (int i = 0; i < 7; i++) {
+            if (working_day[i]) printf("%d ", i+1);
+        }
+        printf("\n");
+        for (int i = 0; i < working_hour_len; i++) {
+            printf("%d - %d\n", working_hour[i][0], working_hour[i][1]);
+        }
+#endif
+    }
+    fclose(f);
+
+    return TRUE;
 }
 
 void setRunningMenuItem() { //thread unsafe
@@ -255,6 +320,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     WNDCLASS wndclass;
     DWORD threadId;
 
+#ifdef DEBUG_PRINT
+    //debug
+    AllocConsole();
+    freopen("CONOUT$", "w", stdout);
+#endif
+
     char* ptr = szCmdLine;
     BOOL parseErr = FALSE;
     //parse args
@@ -274,6 +345,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
     if (parseErr) {
         MessageBox(NULL, TEXT("Usage: model_worker.exe <target_detect_interval>"), szAppName, MB_ICONERROR);
+        return -1;
+    }
+    //parse config file
+    int argc;
+    wchar_t** argv;
+    wchar_t dir[256];
+    wchar_t* slashPos;
+    argv = (wchar_t **)(CommandLineToArgvW(GetCommandLineW(), &argc));
+    slashPos = dir - 1;
+    for (int i = 0; argv[0][i] != '\0'; i++) {
+        dir[i] = argv[0][i];
+        if (dir[i] == '\\') slashPos = &(dir[i]);
+    }
+    for (int i = 0; i < sizeof(config_file_name) / sizeof(wchar_t); i++) {
+        *(slashPos + 1 + i) = config_file_name[i];
+    }
+
+    if (!parseWorkingHours(dir)) {
+        MessageBox(NULL, TEXT("Config file format error."), szAppName, MB_ICONERROR);
         return -1;
     }
 
@@ -305,12 +395,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         MessageBox(NULL, TEXT("Create thread failed."), szAppName, MB_ICONERROR);
         return -1;
     }
-
-#ifdef DEBUG_PRINT
-    //debug
-    AllocConsole();
-    freopen("CONOUT$", "w", stdout);
-#endif
 
     //UI starts here
     HWND handle = FindWindow(NULL, szWndName);
